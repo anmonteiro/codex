@@ -49,6 +49,7 @@ pub mod mcp;
 mod mcp_connection_manager;
 pub mod models_manager;
 mod network_policy_decision;
+mod network_proxy_registry;
 pub mod network_proxy_loader;
 mod original_image_detail;
 pub use mcp_connection_manager::MCP_SANDBOX_STATE_CAPABILITY;

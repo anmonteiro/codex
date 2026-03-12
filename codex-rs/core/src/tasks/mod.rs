@@ -46,6 +46,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::user_input::UserInput;
 
 use crate::features::Feature;
+use crate::network_proxy_registry::NetworkProxyScope;
 pub(crate) use compact::CompactTask;
 pub(crate) use ghost_snapshot::GhostSnapshotTask;
 pub(crate) use regular::RegularTask;
@@ -295,18 +296,22 @@ impl Session {
                     "false"
                 },
             );
-            let network_proxy_active = match self.services.network_proxy.as_ref() {
-                Some(started_network_proxy) => {
-                    match started_network_proxy.proxy().current_cfg().await {
-                        Ok(config) => config.network.enabled,
-                        Err(err) => {
-                            warn!(
-                                "failed to read managed network proxy state for turn metrics: {err:#}"
-                            );
-                            false
-                        }
+            let network_proxy_active = match self
+                .services
+                .network_proxies
+                .get(&NetworkProxyScope::SessionDefault)
+                .await
+            {
+                Some(started_network_proxy) => match started_network_proxy.proxy().current_cfg().await
+                {
+                    Ok(config) => config.network.enabled,
+                    Err(err) => {
+                        warn!(
+                            "failed to read managed network proxy state for turn metrics: {err:#}"
+                        );
+                        false
                     }
-                }
+                },
                 None => false,
             };
             emit_turn_network_proxy_metric(
