@@ -1178,17 +1178,13 @@ impl Tui {
         if screen_size != last_known_screen_size
             && let Ok(cursor_pos) = terminal.get_cursor_position()
         {
-            let last_known_cursor_pos = terminal.last_known_cursor_pos;
-            // If we resized AND the cursor moved, we adjust the viewport area to keep the
-            // cursor in the same position. This is a heuristic that seems to work well
-            // at least in iTerm2.
-            if cursor_pos.y != last_known_cursor_pos.y {
-                let offset = Offset {
-                    x: 0,
-                    y: cursor_pos.y as i32 - last_known_cursor_pos.y as i32,
-                };
-                return Ok(Some(terminal.viewport_area.offset(offset)));
-            }
+            return Ok(resized_viewport_area(
+                terminal.viewport_area,
+                last_known_screen_size,
+                screen_size,
+                terminal.last_known_cursor_pos,
+                cursor_pos,
+            ));
         }
         Ok(None)
     }
@@ -1240,4 +1236,78 @@ fn ensure_virtual_terminal_processing() -> Result<()> {
 #[cfg(not(windows))]
 fn ensure_virtual_terminal_processing() -> Result<()> {
     Ok(())
+}
+
+fn resized_viewport_area(
+    viewport_area: Rect,
+    last_known_screen_size: ratatui::layout::Size,
+    screen_size: ratatui::layout::Size,
+    last_known_cursor_pos: ratatui::layout::Position,
+    cursor_pos: ratatui::layout::Position,
+) -> Option<Rect> {
+    let cursor_delta = cursor_pos.y as i32 - last_known_cursor_pos.y as i32;
+    let screen_height_delta = screen_size.height as i32 - last_known_screen_size.height as i32;
+    if cursor_delta == 0 {
+        return if screen_height_delta == 0 {
+            None
+        } else {
+            Some(viewport_area.offset(Offset {
+                x: 0,
+                y: screen_height_delta,
+            }))
+        };
+    }
+
+    Some(viewport_area.offset(Offset {
+        x: 0,
+        y: cursor_delta,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::layout::Position;
+    use ratatui::layout::Rect;
+    use ratatui::layout::Size;
+
+    use super::resized_viewport_area;
+
+    #[test]
+    fn resize_uses_cursor_delta_when_cursor_moves() {
+        let adjusted = resized_viewport_area(
+            Rect::new(0, 20, 80, 6),
+            Size::new(80, 30),
+            Size::new(80, 45),
+            Position::new(0, 25),
+            Position::new(0, 40),
+        );
+
+        assert_eq!(adjusted, Some(Rect::new(0, 35, 80, 6)));
+    }
+
+    #[test]
+    fn resize_uses_screen_height_delta_when_cursor_position_is_unchanged() {
+        let adjusted = resized_viewport_area(
+            Rect::new(0, 20, 80, 6),
+            Size::new(80, 30),
+            Size::new(80, 45),
+            Position::new(0, 25),
+            Position::new(0, 25),
+        );
+
+        assert_eq!(adjusted, Some(Rect::new(0, 35, 80, 6)));
+    }
+
+    #[test]
+    fn resize_returns_none_when_screen_and_cursor_position_are_unchanged() {
+        let adjusted = resized_viewport_area(
+            Rect::new(0, 20, 80, 6),
+            Size::new(80, 30),
+            Size::new(80, 30),
+            Position::new(0, 25),
+            Position::new(0, 25),
+        );
+
+        assert_eq!(adjusted, None);
+    }
 }
