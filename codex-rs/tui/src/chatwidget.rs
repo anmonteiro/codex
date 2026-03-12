@@ -8703,6 +8703,25 @@ impl ChatWidget {
         (!lines.is_empty()).then_some(lines)
     }
 
+    /// Returns a transient history cell for any in-flight streamed transcript tail that is not
+    /// otherwise redrawn from state.
+    ///
+    /// The inline viewport stores committed transcript cells in terminal scrollback, but the
+    /// newline-gated answer/plan stream keeps its current partial tail in controller state until a
+    /// later commit. Resize reflow uses this to rebuild that tail after clearing visible rows.
+    pub(crate) fn inline_replay_history_cell(&self, width: u16) -> Option<Box<dyn HistoryCell>> {
+        self.stream_controller
+            .as_ref()
+            .and_then(|controller| {
+                controller.preview_cell(Some(width.saturating_sub(2).max(1) as usize))
+            })
+            .or_else(|| {
+                self.plan_stream_controller.as_ref().and_then(|controller| {
+                    controller.preview_cell(Some(width.saturating_sub(4).max(1) as usize))
+                })
+            })
+    }
+
     /// Return a reference to the widget's current config (includes any
     /// runtime overrides applied via TUI, e.g., model or approval policy).
     pub(crate) fn config_ref(&self) -> &Config {

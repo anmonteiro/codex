@@ -1,0 +1,20 @@
+---
+source: tui/src/app.rs
+assertion_line: 5677
+expression: rendered
+---
+╭─────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.0.0)                    │
+│                                             │
+│ model:     gpt-5.3-codex   /model to change │
+│ directory: /tmp/project                     │
+╰─────────────────────────────────────────────╯
+
+
+› Summarize the repo
+
+
+• Committed summary line.
+
+• A resize should keep this
+  streamed tail visible.

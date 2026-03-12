@@ -254,6 +254,30 @@ fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) 
     )));
 }
 
+pub(crate) fn display_lines_for_history_cell(
+    cell: &dyn HistoryCell,
+    width: u16,
+    has_emitted_history_lines: &mut bool,
+) -> Vec<Line<'static>> {
+    let mut display = cell.display_lines(width);
+    if display.is_empty() {
+        return display;
+    }
+
+    // Only insert a separating blank line for new cells that are not
+    // part of an ongoing stream. Streaming continuations should not
+    // accrue extra blank lines between chunks.
+    if !cell.is_stream_continuation() {
+        if *has_emitted_history_lines {
+            display.insert(0, Line::from(""));
+        } else {
+            *has_emitted_history_lines = true;
+        }
+    }
+
+    display
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionSummary {
     usage_line: String,
@@ -659,7 +683,7 @@ pub(crate) struct App {
     // Pager overlay state (Transcript or Static like Diff)
     pub(crate) overlay: Option<Overlay>,
     pub(crate) deferred_history_lines: Vec<Line<'static>>,
-    has_emitted_history_lines: bool,
+    pub(crate) has_emitted_history_lines: bool,
 
     pub(crate) enhanced_keys_supported: bool,
 
@@ -942,6 +966,59 @@ impl App {
             tui.insert_history_lines(header_lines);
             self.has_emitted_history_lines = true;
         }
+    }
+
+    fn inline_transcript_lines_for_width(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = self.clear_ui_header_lines(width);
+        let mut has_emitted_history_lines = !lines.is_empty();
+
+        for cell in &self.transcript_cells {
+            lines.extend(display_lines_for_history_cell(
+                cell.as_ref(),
+                width,
+                &mut has_emitted_history_lines,
+            ));
+        }
+
+        if let Some(cell) = self.chat_widget.inline_replay_history_cell(width) {
+            lines.extend(display_lines_for_history_cell(
+                cell.as_ref(),
+                width,
+                &mut has_emitted_history_lines,
+            ));
+        }
+
+        lines
+    }
+
+    fn reflow_inline_transcript_after_resize(
+        &mut self,
+        tui: &mut tui::Tui,
+        width: u16,
+    ) -> Result<()> {
+        tui.clear_pending_history_lines();
+        tui.terminal.clear_visible_screen()?;
+
+        let mut area = tui.terminal.viewport_area;
+        if area.y > 0 {
+            area.y = 0;
+            tui.terminal.set_viewport_area(area);
+        }
+
+        self.has_emitted_history_lines = false;
+        let lines = self.inline_transcript_lines_for_width(width);
+        if !lines.is_empty() {
+            tui.insert_history_lines(lines);
+            self.has_emitted_history_lines = true;
+        }
+
+        let screen_size = tui.terminal.size()?;
+        tui.terminal.last_known_screen_size = screen_size;
+        if let Ok(cursor_pos) = tui.terminal.get_cursor_position() {
+            tui.terminal.last_known_cursor_pos = cursor_pos;
+        }
+
+        Ok(())
     }
 
     fn clear_terminal_ui(&mut self, tui: &mut tui::Tui, redraw_header: bool) -> Result<()> {
@@ -2070,12 +2147,16 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
-        if matches!(event, TuiEvent::Draw) {
+        let resized = if matches!(event, TuiEvent::Draw) {
             let size = tui.terminal.size()?;
-            if size != tui.terminal.last_known_screen_size {
+            let resized = size != tui.terminal.last_known_screen_size;
+            if resized {
                 self.refresh_status_line();
             }
-        }
+            resized
+        } else {
+            false
+        };
 
         if self.overlay.is_some() {
             let _ = self.handle_backtrack_overlay_event(tui, event).await?;
@@ -2093,9 +2174,17 @@ impl App {
                     self.chat_widget.handle_paste(pasted);
                 }
                 TuiEvent::Draw => {
+                    if resized {
+                        self.reflow_inline_transcript_after_resize(
+                            tui,
+                            tui.terminal.size()?.width,
+                        )?;
+                    }
                     if self.backtrack_render_pending {
                         self.backtrack_render_pending = false;
-                        self.render_transcript_once(tui);
+                        if !resized {
+                            self.render_transcript_once(tui);
+                        }
                     }
                     self.chat_widget.maybe_post_pending_notification(tui);
                     if self
@@ -2307,18 +2396,12 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
                 self.transcript_cells.push(cell.clone());
-                let mut display = cell.display_lines(tui.terminal.last_known_screen_size.width);
+                let display = display_lines_for_history_cell(
+                    cell.as_ref(),
+                    tui.terminal.last_known_screen_size.width,
+                    &mut self.has_emitted_history_lines,
+                );
                 if !display.is_empty() {
-                    // Only insert a separating blank line for new cells that are not
-                    // part of an ongoing stream. Streaming continuations should not
-                    // accrue extra blank lines between chunks.
-                    if !cell.is_stream_continuation() {
-                        if self.has_emitted_history_lines {
-                            display.insert(0, Line::from(""));
-                        } else {
-                            self.has_emitted_history_lines = true;
-                        }
-                    }
                     if self.overlay.is_some() {
                         self.deferred_history_lines.extend(display);
                     } else {
@@ -5505,6 +5588,19 @@ mod tests {
         rendered
     }
 
+    fn plain_text_lines(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
     async fn clear_ui_after_long_transcript_snapshots_fresh_header_only() {
         let rendered = render_clear_ui_header_after_long_transcript_for_snapshot().await;
@@ -5541,6 +5637,44 @@ mod tests {
             .join("\n");
 
         assert_snapshot!("clear_ui_header_fast_status_gpt54_only", rendered);
+    }
+
+    #[tokio::test]
+    async fn inline_transcript_reflow_includes_inflight_stream_tail_snapshot() {
+        let mut app = make_test_app().await;
+        app.config.cwd = PathBuf::from("/tmp/project");
+        app.transcript_cells = vec![
+            Arc::new(UserHistoryCell {
+                message: "Summarize the repo".to_string(),
+                text_elements: Vec::new(),
+                local_image_paths: Vec::new(),
+                remote_image_urls: Vec::new(),
+            }) as Arc<dyn HistoryCell>,
+            Arc::new(AgentMessageCell::new(
+                vec![Line::from("Committed summary line.")],
+                true,
+            )) as Arc<dyn HistoryCell>,
+        ];
+        app.has_emitted_history_lines = true;
+
+        app.chat_widget.handle_codex_event(Event {
+            id: "turn-1".into(),
+            msg: EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".to_string(),
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        });
+        app.chat_widget.handle_codex_event(Event {
+            id: "turn-1".into(),
+            msg: EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+                delta: "A resize should keep this streamed tail visible.".into(),
+            }),
+        });
+
+        let rendered = plain_text_lines(&app.inline_transcript_lines_for_width(32));
+
+        assert_snapshot!("inline_transcript_reflow_includes_stream_tail", rendered);
     }
 
     async fn make_test_app() -> App {

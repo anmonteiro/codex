@@ -100,6 +100,17 @@ impl StreamController {
         self.state.oldest_queued_age(now)
     }
 
+    /// Returns a transient history cell for the current uncommitted stream tail.
+    pub(crate) fn preview_cell(&self, width: Option<usize>) -> Option<Box<dyn HistoryCell>> {
+        let lines = self.state.collector.preview_pending_lines(width);
+        (!lines.is_empty()).then(|| {
+            Box::new(history_cell::AgentMessageCell::new(
+                lines,
+                !self.header_emitted,
+            )) as Box<dyn HistoryCell>
+        })
+    }
+
     fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
         if lines.is_empty() {
             return None;
@@ -198,6 +209,17 @@ impl PlanStreamController {
         self.state.oldest_queued_age(now)
     }
 
+    /// Returns a transient history cell for the current uncommitted plan tail.
+    pub(crate) fn preview_cell(&self, width: Option<usize>) -> Option<Box<dyn HistoryCell>> {
+        let lines = self.state.collector.preview_pending_lines(width);
+        (!lines.is_empty()).then(|| {
+            Box::new(history_cell::new_proposed_plan_stream(
+                lines,
+                self.header_emitted,
+            )) as Box<dyn HistoryCell>
+        })
+    }
+
     fn emit(
         &mut self,
         lines: Vec<Line<'static>>,
@@ -242,6 +264,7 @@ impl PlanStreamController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
     use std::path::PathBuf;
 
     fn test_cwd() -> PathBuf {
@@ -261,6 +284,35 @@ mod tests {
                     .join("")
             })
             .collect()
+    }
+
+    #[test]
+    fn stream_preview_cell_renders_partial_tail() {
+        let mut ctrl = StreamController::new(None, &test_cwd());
+        ctrl.push("partial tail");
+
+        let preview = ctrl.preview_cell(None).expect("preview cell");
+
+        assert_eq!(
+            lines_to_plain_strings(&preview.display_lines(40)),
+            vec!["• partial tail".to_string()]
+        );
+    }
+
+    #[test]
+    fn stream_preview_cell_uses_continuation_indent_after_first_chunk() {
+        let mut ctrl = StreamController::new(None, &test_cwd());
+        ctrl.push("first line\n");
+        let (first, _idle) = ctrl.on_commit_tick();
+        assert!(first.is_some(), "expected first streamed cell to emit");
+
+        ctrl.push("continued");
+        let preview = ctrl.preview_cell(None).expect("preview cell");
+
+        assert_eq!(
+            lines_to_plain_strings(&preview.display_lines(40)),
+            vec!["  continued".to_string()]
+        );
     }
 
     #[tokio::test]

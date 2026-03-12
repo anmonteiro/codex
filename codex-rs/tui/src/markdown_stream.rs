@@ -72,6 +72,38 @@ impl MarkdownStreamCollector {
         out
     }
 
+    /// Render the current buffer at `width` and return only the lines that have not yet been
+    /// committed into history cells.
+    ///
+    /// This is used when the inline transcript must be reconstructed from state, such as after a
+    /// terminal resize clears the rows that previously only existed as terminal output. The
+    /// returned lines intentionally exclude already committed lines, even if they are still queued
+    /// for animated insertion.
+    pub fn preview_pending_lines(&self, width: Option<usize>) -> Vec<Line<'static>> {
+        if self.buffer.is_empty() {
+            return Vec::new();
+        }
+
+        let mut source = self.buffer.clone();
+        if !source.ends_with('\n') {
+            source.push('\n');
+        }
+
+        let mut rendered: Vec<Line<'static>> = Vec::new();
+        markdown::append_markdown(
+            &source,
+            width.or(self.width),
+            Some(self.cwd.as_path()),
+            &mut rendered,
+        );
+
+        if self.committed_line_count >= rendered.len() {
+            Vec::new()
+        } else {
+            rendered[self.committed_line_count..].to_vec()
+        }
+    }
+
     /// Finalize the stream: emit all remaining lines beyond the last commit.
     /// If the buffer does not end with a newline, a temporary one is appended
     /// for rendering. Optionally unwraps ```markdown language fences in
@@ -228,6 +260,23 @@ mod tests {
         assert!(
             has_light_blue,
             "expected an ordered-list marker span with light blue fg on: {line:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_pending_lines_returns_partial_tail_without_committed_lines() {
+        let mut collector = super::MarkdownStreamCollector::new(None, &super::test_cwd());
+        collector.push_delta("committed line\n");
+        assert_eq!(
+            collector.commit_complete_lines(),
+            vec![Line::from("committed line")]
+        );
+
+        collector.push_delta("partial tail");
+
+        assert_eq!(
+            collector.preview_pending_lines(None),
+            vec![Line::from("partial tail")]
         );
     }
 

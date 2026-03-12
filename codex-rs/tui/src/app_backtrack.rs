@@ -256,7 +256,14 @@ impl App {
         if !self.transcript_cells.is_empty() {
             let width = tui.terminal.last_known_screen_size.width;
             for cell in &self.transcript_cells {
-                tui.insert_history_lines(cell.display_lines(width));
+                let display = crate::app::display_lines_for_history_cell(
+                    cell.as_ref(),
+                    width,
+                    &mut self.has_emitted_history_lines,
+                );
+                if !display.is_empty() {
+                    tui.insert_history_lines(display);
+                }
             }
         }
     }
