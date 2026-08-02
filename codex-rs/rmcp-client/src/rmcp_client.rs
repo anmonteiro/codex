@@ -406,7 +406,7 @@ pub struct RmcpClient {
     protocol_mode: McpProtocolMode,
     requires_read_only_tools: bool,
     initialize_context: Mutex<Option<InitializeContext>>,
-    session_recovery_lock: Semaphore,
+    service_recovery_lock: Semaphore,
     elicitation_pause_state: ElicitationPauseState,
 }
 
@@ -446,7 +446,7 @@ impl RmcpClient {
             protocol_mode: McpProtocolMode::Legacy,
             requires_read_only_tools: false,
             initialize_context: Mutex::new(None),
-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            service_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
         })
     }
@@ -520,7 +520,7 @@ impl RmcpClient {
             protocol_mode,
             initialize_context: Mutex::new(None),
             requires_read_only_tools: false,
-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            service_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
         })
     }
@@ -627,7 +627,7 @@ impl RmcpClient {
             protocol_mode,
             initialize_context: Mutex::new(None),
             requires_read_only_tools: false,
-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            service_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
         })
     }
@@ -1050,12 +1050,14 @@ impl RmcpClient {
     pub async fn is_closed(&self) -> bool {
         let state = self.state.lock().await;
         match &*state {
-            ClientState::Ready { service, .. } => {
-                service.is_closed() || service.peer().is_transport_closed()
-            }
+            ClientState::Ready { service, .. } => Self::service_is_closed(service),
             ClientState::Connecting { .. } => false,
             ClientState::Closed => true,
         }
+    }
+
+    fn service_is_closed(service: &RunningService<RoleClient, ElicitationClientService>) -> bool {
+        service.is_closed() || service.peer().is_transport_closed()
     }
 
     /// Stop the MCP transport and any stdio server process owned by this client.
@@ -1395,7 +1397,12 @@ impl RmcpClient {
         F: Fn(Arc<RunningService<RoleClient, ElicitationClientService>>) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
     {
-        let service = self.service().await?;
+        let mut service = self.service().await?;
+        if Self::service_is_closed(&service) {
+            self.recover_service(&service).await?;
+            service = self.service().await?;
+        }
+
         match Self::run_service_operation_with_transient_retries(
             Arc::clone(&service),
             label,
@@ -1407,7 +1414,7 @@ impl RmcpClient {
         {
             Ok(result) => Ok(result),
             Err(error) if Self::is_session_expired_404(&error) => {
-                self.reinitialize_after_session_expiry(&service).await?;
+                self.recover_service(&service).await?;
                 let recovered_service = self.service().await?;
                 Self::run_service_operation_with_transient_retries(
                     recovered_service,
@@ -1540,12 +1547,12 @@ impl RmcpClient {
             })
     }
 
-    async fn reinitialize_after_session_expiry(
+    async fn recover_service(
         &self,
         failed_service: &Arc<RunningService<RoleClient, ElicitationClientService>>,
     ) -> Result<()> {
         let _recovery_guard = self
-            .session_recovery_lock
+            .service_recovery_lock
             .acquire()
             .await
             .map_err(|_| anyhow!("MCP client recovery semaphore closed"))?;
