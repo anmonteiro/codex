@@ -311,7 +311,7 @@ async fn recovered_connections_accept_elicitations_with_previously_cancelled_ids
         .await?;
 
         let previous = client.current_session().await?;
-        client.reinitialize_after_session_expiry(&previous).await?;
+        client.recover_service(&previous).await?;
         let recovered_server = timeout(Duration::from_secs(/*secs*/ 5), server_rx.recv())
             .await?
             .unwrap()?;
@@ -685,8 +685,7 @@ async fn shutdown_wins_over_a_coalesced_recovery_waiter() -> anyhow::Result<()> 
     timeout(LIFECYCLE_TIMEOUT, replacement_client.shutdown()).await?;
     let mut state = client.state.lock().await;
     *state = ClientState::Ready(replacement);
-    let mut recovery =
-        Box::pin(client.reinitialize_after_session_expiry_inner(&failed, /*deadline*/ None));
+    let mut recovery = Box::pin(client.recover_service_inner(&failed, /*deadline*/ None));
     assert!(futures::poll!(recovery.as_mut()).is_pending());
     let mut shutdown = Box::pin(client.shutdown());
     assert!(futures::poll!(shutdown.as_mut()).is_pending());

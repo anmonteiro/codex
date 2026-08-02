@@ -479,7 +479,7 @@ pub struct RmcpClient {
     protocol_mode: McpProtocolMode,
     requires_read_only_tools: bool,
     initialize_context: Mutex<Option<InitializeContext>>,
-    session_recovery_lock: Semaphore,
+    service_recovery_lock: Semaphore,
     elicitation_pause_state: ElicitationPauseState,
     tool_list_revision: Arc<AtomicU64>,
     cancel_requests_on_drop: AtomicBool,
@@ -567,7 +567,7 @@ impl RmcpClient {
             protocol_mode: McpProtocolMode::Legacy,
             requires_read_only_tools: false,
             initialize_context: Mutex::new(None),
-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            service_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
             tool_list_revision: Arc::default(),
             cancel_requests_on_drop: AtomicBool::new(false),
@@ -643,7 +643,7 @@ impl RmcpClient {
             protocol_mode,
             initialize_context: Mutex::new(None),
             requires_read_only_tools: false,
-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            service_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
             tool_list_revision: Arc::default(),
             cancel_requests_on_drop: AtomicBool::new(false),
@@ -752,7 +752,7 @@ impl RmcpClient {
             protocol_mode,
             initialize_context: Mutex::new(None),
             requires_read_only_tools: false,
-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            service_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
             tool_list_revision: Arc::default(),
             cancel_requests_on_drop: AtomicBool::new(false),
@@ -1405,7 +1405,7 @@ impl RmcpClient {
         if !session.is_expired() {
             return Ok(Arc::clone(&session.service));
         }
-        let session = self.reinitialize_after_session_expiry(&session).await?;
+        let session = self.recover_service(&session).await?;
         if session.is_expired() {
             return Err(ClientOperationError::Service(
                 rmcp::service::ServiceError::TransportClosed,
@@ -1437,13 +1437,15 @@ impl RmcpClient {
         let state = self.state.lock().await;
         match &*state {
             ClientState::Ready(session) => {
-                session.is_expired()
-                    || session.service.is_closed()
-                    || session.service.peer().is_transport_closed()
+                session.is_expired() || Self::service_is_closed(&session.service)
             }
             ClientState::Connecting { .. } => false,
             ClientState::Closed => true,
         }
+    }
+
+    fn service_is_closed(service: &RunningService<RoleClient, ElicitationClientService>) -> bool {
+        service.is_closed() || service.peer().is_transport_closed()
     }
 
     /// Stop the MCP transport and any stdio server process owned by this client.
@@ -1973,10 +1975,10 @@ impl RmcpClient {
     {
         let mut session = self.current_session().await?;
         let reply_expired = session.is_expired();
-        let operation_timeout = if reply_expired {
+        let operation_timeout = if reply_expired || Self::service_is_closed(&session.service) {
             let deadline = timeout.map(|duration| Instant::now() + duration);
             let _remaining = remaining_operation_timeout(label, timeout, deadline)?;
-            let recovery = self.reinitialize_after_session_expiry_inner(&session, deadline);
+            let recovery = self.recover_service_inner(&session, deadline);
             let recovered = match timeout {
                 Some(duration) => time::timeout(duration, recovery).await.map_err(|_| {
                     ClientOperationError::Timeout {
@@ -2028,7 +2030,7 @@ impl RmcpClient {
                     session.expire();
                     return Err(error.into());
                 }
-                let recovered = self.reinitialize_after_session_expiry(&session)
+                let recovered = self.recover_service(&session)
                     .await
                     .inspect_err(|_| {
                         if let TransportRecipe::StreamableHttp { server_name, .. } = &self.transport_recipe {
@@ -2166,20 +2168,20 @@ impl RmcpClient {
             })
     }
 
-    fn reinitialize_after_session_expiry<'a>(
+    fn recover_service<'a>(
         &'a self,
         failed_session: &'a Arc<ReadySession>,
     ) -> BoxFuture<'a, Result<Arc<ReadySession>>> {
-        Box::pin(self.reinitialize_after_session_expiry_inner(failed_session, /*deadline*/ None))
+        Box::pin(self.recover_service_inner(failed_session, /*deadline*/ None))
     }
 
-    async fn reinitialize_after_session_expiry_inner(
+    async fn recover_service_inner(
         &self,
         failed_session: &Arc<ReadySession>,
         deadline: Option<Instant>,
     ) -> Result<Arc<ReadySession>> {
         let recovery_guard = self
-            .session_recovery_lock
+            .service_recovery_lock
             .acquire()
             .await
             .map_err(|_| anyhow!("MCP client recovery semaphore closed"))?;
