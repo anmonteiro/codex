@@ -375,7 +375,8 @@ impl RingBuffer {
             return;
         }
 
-        self.buf.retain_back(self.max - data.len());
+        let excess = self.buf.len().saturating_sub(self.max - data.len());
+        self.buf.drain(..excess);
         self.buf.extend(data.iter().copied());
     }
 
